@@ -9,6 +9,7 @@ from .serializers import (
     SendNotificationSerializer
 )
 from .services.notification_services import NotificationService
+from users.serializers import UserSerializer 
 
 
 class NotificationViewSet(viewsets.ModelViewSet):
