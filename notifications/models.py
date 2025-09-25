@@ -1,53 +1,70 @@
+import re
+
 from django.db import models
-from django.contrib.auth.models import User
 
 
-class NotificationPreference(models.Model):
-    NOTIFICATION_TYPES = [
-        ('email', 'Email'),
-        ('sms', 'SMS'),
-        ('telegram', 'Telegram'),
-    ]
+class ChannelConfig:
+    """Конфигурация каналов отправки"""
+    def __init__(self, emails=None, phones=None, telegram_chat_ids=None):
+        self.emails = emails or []
+        self.phones = [self._validate_phone(phone) for phone in (phones or [])]
+        self.telegram_chat_ids = telegram_chat_ids or []
+    
+    def _validate_phone(self, phone):
+        """Валидация номера телефона"""
+        cleaned_phone = re.sub(r'[^\d+]', '', phone)
+        if not cleaned_phone.startswith('+') and len(cleaned_phone) == 11:
+            if cleaned_phone.startswith('8'):
+                return '+7' + cleaned_phone[1:]
+            elif cleaned_phone.startswith('7'):
+                return '+' + cleaned_phone
+        return cleaned_phone
 
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
-    notification_type = models.CharField(max_length=10, choices=NOTIFICATION_TYPES)
-    is_active = models.BooleanField(default=True)
-    priority = models.IntegerField(default=1)
+
+class NotificationLog(models.Model):
+    """Модель для логирования отправки"""
+
+    class Status:
+        SENT = 'sent'
+        FAILED = 'failed'
+        CHOICES = [(SENT, 'Отправлено'), (FAILED, 'Ошибка')]
+
+    class Channel:
+        EMAIL = 'email'
+        SMS = 'sms'
+        TELEGRAM = 'telegram'
+        CHOICES = [(EMAIL, 'Email'), (SMS, 'SMS'), (TELEGRAM, 'Telegram')]
+
+    # Контактные данныеы
     email = models.EmailField(blank=True, null=True)
     phone = models.CharField(max_length=20, blank=True, null=True)
     telegram_chat_id = models.CharField(max_length=100, blank=True, null=True)
 
-    class Meta:
-        unique_together = ['user', 'notification_type']
-        ordering = ['priority']
-
-
-class Notification(models.Model):
-    STATUS_CHOICES = [
-        ('pending', 'Ожидает отправки'),
-        ('sent', 'Отправлено'),
-        ('failed', 'Не удалось отправить'),
-        ('retrying', 'Повторная попытка'),
-    ]
-
-    user = models.ForeignKey(User, on_delete=models.CASCADE)
+    # Сообщение
     title = models.CharField(max_length=200)
     message = models.TextField()
-    notification_type = models.CharField(max_length=10, choices=NotificationPreference.NOTIFICATION_TYPES)
-    status = models.CharField(max_length=10, choices=STATUS_CHOICES, default='pending')
+
+    # Статус отправки
+    channel_used = models.CharField(max_length=10, choices=Channel.CHOICES)
+    status = models.CharField(max_length=10, choices=Status.CHOICES)
+    error_message = models.TextField(blank=True, null=True)
+
     created_at = models.DateTimeField(auto_now_add=True)
-    sent_at = models.DateTimeField(null=True, blank=True)
-    retry_count = models.IntegerField(default=0)
-    max_retries = models.IntegerField(default=3)
 
     class Meta:
         ordering = ['-created_at']
 
-
-class NotificationLog(models.Model):
-    notification = models.ForeignKey(Notification, on_delete=models.CASCADE)
-    attempt_number = models.IntegerField()
-    channel_used = models.CharField(max_length=10, choices=NotificationPreference.NOTIFICATION_TYPES)
-    status = models.CharField(max_length=10, choices=Notification.STATUS_CHOICES)
-    error_message = models.TextField(blank=True, null=True)
-    created_at = models.DateTimeField(auto_now_add=True)
+    @classmethod
+    def create_log(cls, channel_used, status, title, message, 
+                   email=None, phone=None, telegram_chat_id=None, error_message=None):
+        """Создать запись в логе"""
+        return cls.objects.create(
+            email=email,
+            phone=phone,
+            telegram_chat_id=telegram_chat_id,
+            title=title,
+            message=message,
+            channel_used=channel_used,
+            status=status,
+            error_message=error_message
+        )

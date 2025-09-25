@@ -1,206 +1,181 @@
-from datetime import timezone
 import logging
-import requests
+from typing import List, Tuple
 
-from django.core.mail import send_mail
-from django.conf import settings
-from notifications.models import NotificationPreference, Notification, NotificationLog
+from .email_sender import EmailSender
+from .sms_sender import SMSSender
+from .telegram_sender import TelegramSender
+from ..models import NotificationLog, ChannelConfig
+
 
 logger = logging.getLogger(__name__)
 
 
-class EmailService:
-    @staticmethod
-    def send_notification(email, title, message):
-        try:
-            send_mail(
-                subject=title,
-                message=message,
-                from_email=settings.DEFAULT_FROM_EMAIL,
-                recipient_list=[email],
-                fail_silently=False,
-            )
-            return True, None
-        except Exception as e:
-            logger.error(f"Email sending failed: {str(e)}")
-            return False, str(e)
-
-
-class TelegramService:
-    def __init__(self):
-        self.bot_token = getattr(settings, 'TELEGRAM_BOT_TOKEN', '')
-        self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
-
-    def send_message(self, chat_id, message, parse_mode='HTML'):
-        """Отправка сообщения в Telegram"""
-        try:
-            if not self.bot_token:
-                return False, "Telegram bot token not configured"
-
-            url = f"{self.base_url}/sendMessage"
-            payload = {
-                'chat_id': chat_id,
-                'text': message,
-                'parse_mode': parse_mode,
-                'disable_web_page_preview': True
-            }
-
-            response = requests.post(url, json=payload, timeout=10)
-            response.raise_for_status()
-
-            data = response.json()
-            if data.get('ok'):
-                return True, None
-            else:
-                return False, f"Telegram API error: {data.get('description', 'Unknown error')}"
-
-        except requests.exceptions.RequestException as e:
-            logger.error(f"Telegram sending error: {str(e)}")
-            return False, str(e)
-        except Exception as e:
-            logger.error(f"Unexpected Telegram error: {str(e)}")
-            return False, str(e)
-
-    def get_bot_info(self):
-        """Получение информации о боте"""
-        try:
-            url = f"{self.base_url}/getMe"
-            response = requests.get(url, timeout=5)
-            data = response.json()
-            return data if data.get('ok') else None
-        except Exception as e:
-            logger.error(f"Bot info error: {str(e)}")
-            return None
-
-
-def get_telegram_chat_id(bot_token):
-    """Получить chat_id через обновления бота"""
-    try:
-        url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
-        response = requests.get(url, timeout=5)
-        data = response.json()
-
-        if data.get('ok') and data.get('result'):
-            for update in data['result']:
-                if 'message' in update:
-                    return update['message']['chat']['id']
-        return None
-    except Exception as e:
-        logger.error(f"Chat ID fetch error: {str(e)}")
-        return None
-
-
-class SMSService:
-    def send_sms(self, phone, message):
-        """Простая отправка через SMS.ru API"""
-        try:
-            api_id = getattr(settings, 'SMSRU_API_ID', '')
-            if not api_id:
-                return False, "SMS API ID not configured"
-
-            url = "https://sms.ru/sms/send"
-            params = {
-                'api_id': api_id,
-                'to': phone,
-                'msg': message,
-                'json': 1
-            }
-
-            response = requests.get(url, params=params, timeout=10)
-            data = response.json()
-
-            if data.get('status') == 'OK':
-                return True, None
-            else:
-                return False, f"SMS error: {data.get('status_text', 'Unknown error')}"
-
-        except Exception as e:
-            logger.error(f"SMS sending error: {str(e)}")
-            return False, str(e)
-
-
 class NotificationService:
+    """Сервис отправки уведомлений нескольким пользователям"""
+
     def __init__(self):
-        self.email_service = EmailService()
-        self.sms_service = SMSService()
-        self.telegram_service = TelegramService()
+        self.senders = {
+            'email': EmailSender(),
+            'sms': SMSSender(),
+            'telegram': TelegramSender(),
+        }
+        self.channel_priority = ['telegram', 'email', 'sms']
 
-    def get_user_channels(self, user):
-        """Получить активные каналы пользователя в порядке приоритета"""
-        return NotificationPreference.objects.filter(
-            user=user,
-            is_active=True
-        ).order_by('priority')
-
-    def send_via_channel(self, channel, title, message):
-        """Отправить уведомление через конкретный канал"""
-        if channel.notification_type == 'email' and channel.email:
-            return self.email_service.send_notification(channel.email, title, message)
-        elif channel.notification_type == 'sms' and channel.phone:
-            return self.sms_service.send_notification(channel.phone, message)
-        elif channel.notification_type == 'telegram' and channel.telegram_chat_id:
-            return self.telegram_service.send_notification(channel.telegram_chat_id, message)
-        return False, "Channel not properly configured"
-
-    def send_notification(self, user, title, message, preferred_channel=None):
-        """Основной метод отправки уведомления с резервными каналами"""
-
-        notification = Notification.objects.create(
-            user=user,
-            title=title,
-            message=message,
-            notification_type=preferred_channel or 'email'
+    def send_single_message(self, title: str, message: str,
+                          email: str = None, phone: str = None,
+                          telegram_chat_id: str = None,
+                          preferred_channel: str = None) -> Tuple[bool, str]:
+        """Отправить сообщение одному пользователю"""
+        config = ChannelConfig(
+            emails=[email] if email else [],
+            phones=[phone] if phone else [],
+            telegram_chat_ids=[telegram_chat_id] if telegram_chat_id else []
         )
 
-        channels = self.get_user_channels(user)
-        if not channels:
-            notification.status = 'failed'
-            notification.save()
-            return False, "No active notification channels found"
+        return self._send_to_channels(title, message, config, preferred_channel, single_recipient=True)
 
-        if preferred_channel:
-            channels = sorted(channels,
-                            key=lambda x: x.notification_type != preferred_channel)
+    def send_bulk_message(self, title: str, message: str,
+                         emails: List[str] = None, phones: List[str] = None,
+                         telegram_chat_ids: List[str] = None,
+                         preferred_channel: str = None) -> dict:
+        """Отправить сообщение нескольким пользователям"""
+        config = ChannelConfig(
+            emails=emails or [],
+            phones=phones or [],
+            telegram_chat_ids=telegram_chat_ids or []
+        )
 
-        success = False
-        last_error = None
+        results = {
+            'total_recipients': len(emails or []) + len(phones or []) + len(telegram_chat_ids or []),
+            'successful': 0,
+            'failed': 0,
+            'details': []
+        }
 
-        for channel in channels:
-            notification.retry_count += 1
-            notification.save()
+        # Отправляем на все email
+        for email in config.emails:
+            success, message_result = self._send_to_single_contact(
+                title, message, 'email', email, preferred_channel
+            )
+            results['details'].append({
+                'contact': email,
+                'channel': 'email',
+                'success': success,
+                'message': message_result
+            })
+            if success:
+                results['successful'] += 1
+            else:
+                results['failed'] += 1
 
-            log_entry = NotificationLog.objects.create(
-                notification=notification,
-                attempt_number=notification.retry_count,
-                channel_used=channel.notification_type,
-                status='pending'
+        # Отправляем на все телефоны
+        for phone in config.phones:
+            success, message_result = self._send_to_single_contact(
+                title, message, 'sms', phone, preferred_channel
+            )
+            results['details'].append({
+                'contact': phone,
+                'channel': 'sms',
+                'success': success,
+                'message': message_result
+            })
+            if success:
+                results['successful'] += 1
+            else:
+                results['failed'] += 1
+
+        # Отправляем на все Telegram chat_id
+        for chat_id in config.telegram_chat_ids:
+            success, message_result = self._send_to_single_contact(
+                title, message, 'telegram', chat_id, preferred_channel
+            )
+            results['details'].append({
+                'contact': chat_id,
+                'channel': 'telegram',
+                'success': success,
+                'message': message_result
+            })
+            if success:
+                results['successful'] += 1
+            else:
+                results['failed'] += 1
+
+        return results
+
+    def _send_to_single_contact(self, title: str, message: str, channel: str, 
+                              destination: str, preferred_channel: str = None) -> Tuple[bool, str]:
+        """Отправить сообщение одному контакту через указанный канал"""
+        try:
+            sender = self.senders.get(channel)
+            if not sender:
+                return False, f"Unsupported channel: {channel}"
+
+            success, error = sender.send(destination, title, message)
+
+            log_data = {
+                'email': destination if channel == 'email' else None,
+                'phone': destination if channel == 'sms' else None,
+                'telegram_chat_id': destination if channel == 'telegram' else None,
+            }
+
+            NotificationLog.create_log(
+                channel_used=channel,
+                status=NotificationLog.Status.SENT if success else NotificationLog.Status.FAILED,
+                title=title,
+                message=message,
+                error_message=error if not success else None,
+                **log_data
             )
 
-            try:
-                success, error = self.send_via_channel(channel, title, message)
+            if success:
+                return True, f"Сообщение отправлено на {destination} через {channel}"
+            else:
+                return False, f"Ошибка отправки на {destination} через {channel}: {error}"
 
+        except Exception as e:
+            logger.error(f"Error sending to {destination} via {channel}: {str(e)}")
+            return False, str(e)
+
+    def _send_to_channels(self, title: str, message: str, config: ChannelConfig,
+                         preferred_channel: str = None, single_recipient: bool = False) -> Tuple[bool, str]:
+        """ Отправка с через разные каналы (для одного пользователя)"""
+        channels_to_try = self.channel_priority.copy()
+        if preferred_channel and preferred_channel in channels_to_try:
+            channels_to_try.remove(preferred_channel)
+            channels_to_try.insert(0, preferred_channel)
+
+        last_error = None
+
+        for channel in channels_to_try:
+            destinations = []
+            if channel == 'email' and config.emails:
+                destinations = config.emails
+            elif channel == 'sms' and config.phones:
+                destinations = config.phones
+            elif channel == 'telegram' and config.telegram_chat_ids:
+                destinations = config.telegram_chat_ids
+
+            if not destinations:
+                continue
+
+            # Для одного пользователя берем первый доступный контакт
+            destination = destinations[0] if single_recipient else None
+            if single_recipient:
+                success, result = self._send_to_single_contact(
+                    title, message, channel, destination, preferred_channel
+                )
                 if success:
-                    log_entry.status = 'sent'
-                    log_entry.save()
+                    return True, result
+                last_error = result
+            else:
+                # Для множественных получателей пробуем все каналы
+                for dest in destinations:
+                    success, result = self._send_to_single_contact(
+                        title, message, channel, dest, preferred_channel
+                    )
+                    if success and single_recipient:
+                        return True, result
+                    if not success:
+                        last_error = result
 
-                    notification.status = 'sent'
-                    notification.sent_at = timezone.now()
-                    notification.notification_type = channel.notification_type
-                    notification.save()
-                    return True, None
-                else:
-                    log_entry.status = 'failed'
-                    log_entry.error_message = error
-                    log_entry.save()
-                    last_error = error
-
-            except Exception as e:
-                logger.error(f"Error sending via {channel.notification_type}: {str(e)}")
-                log_entry.status = 'failed'
-                log_entry.error_message = str(e)
-                log_entry.save()
-                last_error = str(e)
-
-        notification.status = 'failed'
-        notification.save()
-        return False, last_error or "All notification channels failed"
+        return False, last_error or "Не удалось отправить сообщение"

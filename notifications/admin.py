@@ -1,24 +1,15 @@
 from django.contrib import admin
-from .models import Notification, NotificationPreference, NotificationLog
 
-
-@admin.register(Notification)
-class NotificationAdmin(admin.ModelAdmin):
-    list_display = ['user', 'title', 'notification_type', 'status', 'created_at']
-    list_filter = ['status', 'notification_type', 'created_at']
-    search_fields = ['title', 'message', 'user__username']
-
-
-@admin.register(NotificationPreference)
-class NotificationPreferenceAdmin(admin.ModelAdmin):
-    list_display = ['user', 'notification_type', 'is_active', 'priority']
-    list_filter = ['notification_type', 'is_active']
+from .models import NotificationLog
 
 
 @admin.register(NotificationLog)
 class NotificationLogAdmin(admin.ModelAdmin):
-    list_display = ['notification', 'attempt_number', 'channel_used', 'status', 'created_at']
-    list_filter = ['channel_used', 'status']
+    list_display = ['id', 'title', 'channel_used', 'status', 'email', 'phone', 'created_at']
+    list_filter = ['channel_used', 'status', 'created_at']
+    search_fields = ['title', 'message', 'email', 'phone', 'telegram_chat_id']
+    readonly_fields = ['created_at']
+    date_hierarchy = 'created_at'
 
-
-admin.site.site_header = "Notification System Admin"
+    def has_add_permission(self, request):
+        return False

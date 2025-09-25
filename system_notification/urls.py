@@ -6,9 +6,9 @@ from rest_framework import permissions
 
 schema_view = get_schema_view(
    openapi.Info(
-      title="Referral System API",
+      title="Notification system API",
       default_version='v1',
-      description="API documentation for Referral System",
+      description="API documentation for Notification system",
       terms_of_service="https://www.google.com/policies/terms/",
       contact=openapi.Contact(email="contact@example.com"),
       license=openapi.License(name="BSD License"),
@@ -19,9 +19,7 @@ schema_view = get_schema_view(
 
 urlpatterns = [
     path('admin/', admin.site.urls),
-    path('api/auth/', include('rest_framework.urls')),
-    path('api/users/', include('users.urls')),
-    path('api/notifications/', include('notifications.urls')),
+    path('api/', include('notifications.urls')),
     path('swagger/', schema_view.with_ui('swagger', cache_timeout=0), name='schema-swagger-ui'),
     path('redoc/', schema_view.with_ui('redoc', cache_timeout=0), name='schema-redoc'),
 ]

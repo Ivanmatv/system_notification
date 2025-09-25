@@ -1,38 +1,79 @@
-# notifications/tasks.py
-from celery import shared_task
-from django.contrib.auth.models import User
-from .services.notification_services import NotificationService
 import logging
+
+from celery import shared_task
+
+from .services.notification_service import NotificationService
 
 logger = logging.getLogger(__name__)
 
 
-@shared_task(bind=True, max_retries=3)
-def send_notification_task(self, user_id, title, message, preferred_channel=None):
+@shared_task
+def send_single_message_task(
+    title,
+    message,
+    email=None,
+    phone=None,
+    telegram_chat_id=None,
+    preferred_channel=None
+):
+    """Асинхронная отправка сообщения одному пользователю"""
     try:
-        user = User.objects.get(id=user_id)
         service = NotificationService()
-        success, error = service.send_notification(user, title, message, preferred_channel)
+        success, result = service.send_single_message(
+            title=title,
+            message=message,
+            email=email,
+            phone=phone,
+            telegram_chat_id=telegram_chat_id,
+            preferred_channel=preferred_channel
+        )
 
-        if not success:
-            logger.error(f"Failed to send notification to user {user_id}: {error}")
-
-            raise Exception(error)
-
-        logger.info(f"Notification sent successfully to user {user_id}")
         return {
-            'status': 'success', 
-            'message': 'Notification sent',
-            'user_id': user_id,
-            'title': title
+            'status': 'success' if success else 'error',
+            'message': result,
+            'type': 'single'
         }
 
-    except User.DoesNotExist as exc:
-        logger.error(f"User {user_id} not found")
-        # Не повторяем попытку, если пользователь не найден
-        return {'status': 'error', 'message': 'User not found'}
+    except Exception as e:
+        logger.error(f"Error in send_single_message_task: {str(e)}")
+        return {
+            'status': 'error',
+            'message': str(e),
+            'type': 'single'
+        }
 
-    except Exception as exc:
-        logger.error(f"Error sending notification: {str(exc)}")
-        # Повтор через 60 секунд
-        self.retry(exc=exc, countdown=60)
+
+@shared_task
+def send_bulk_message_task(
+    title,
+    message,
+    emails=None,
+    phones=None,
+    telegram_chat_ids=None,
+    preferred_channel=None
+):
+    """Асинхронная массовая отправка сообщений"""
+    try:
+        service = NotificationService()
+        results = service.send_bulk_message(
+            title=title,
+            message=message,
+            emails=emails or [],
+            phones=phones or [],
+            telegram_chat_ids=telegram_chat_ids or [],
+            preferred_channel=preferred_channel
+        )
+
+        return {
+            'status': 'success',
+            'results': results,
+            'type': 'bulk'
+        }
+
+    except Exception as e:
+        logger.error(f"Error in send_bulk_message_task: {str(e)}")
+        return {
+            'status': 'error',
+            'message': str(e),
+            'type': 'bulk'
+        }
