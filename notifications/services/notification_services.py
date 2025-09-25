@@ -2,12 +2,9 @@ from datetime import timezone
 import logging
 import requests
 
-
 from django.core.mail import send_mail
 from django.conf import settings
-from twilio.rest import Client
-
-from .models import Notification, NotificationLog
+from notifications.models import NotificationPreference, Notification, NotificationLog
 
 logger = logging.getLogger(__name__)
 
@@ -29,51 +26,96 @@ class EmailService:
             return False, str(e)
 
 
-class SMSService:
-    def __init__(self):
-        self.twilio_client = Client(
-            getattr(settings, 'TWILIO_ACCOUNT_SID', ''),
-            getattr(settings, 'TWILIO_AUTH_TOKEN', '')
-        )
-
-    def send_notification(self, phone, message):
-        try:
-            if not all([settings.TWILIO_ACCOUNT_SID, settings.TWILIO_AUTH_TOKEN, settings.TWILIO_PHONE_NUMBER]):
-                return False, "SMS service not configured"
-
-            self.twilio_client.messages.create(
-                body=message,
-                from_=settings.TWILIO_PHONE_NUMBER,
-                to=phone
-            )
-            return True, None
-        except Exception as e:
-            logger.error(f"SMS sending failed: {str(e)}")
-            return False, str(e)
-
-
 class TelegramService:
-    @staticmethod
-    def send_notification(chat_id, message):
+    def __init__(self):
+        self.bot_token = getattr(settings, 'TELEGRAM_BOT_TOKEN', '')
+        self.base_url = f"https://api.telegram.org/bot{self.bot_token}"
+
+    def send_message(self, chat_id, message, parse_mode='HTML'):
+        """Отправка сообщения в Telegram"""
         try:
-            bot_token = getattr(settings, 'TELEGRAM_BOT_TOKEN', '')
-            if not bot_token:
+            if not self.bot_token:
                 return False, "Telegram bot token not configured"
 
-            url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+            url = f"{self.base_url}/sendMessage"
             payload = {
                 'chat_id': chat_id,
                 'text': message,
-                'parse_mode': 'HTML'
+                'parse_mode': parse_mode,
+                'disable_web_page_preview': True
             }
 
-            response = requests.post(url, json=payload)
-            if response.status_code == 200:
+            response = requests.post(url, json=payload, timeout=10)
+            response.raise_for_status()
+
+            data = response.json()
+            if data.get('ok'):
                 return True, None
             else:
-                return False, f"Telegram API error: {response.text}"
+                return False, f"Telegram API error: {data.get('description', 'Unknown error')}"
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Telegram sending error: {str(e)}")
+            return False, str(e)
         except Exception as e:
-            logger.error(f"Telegram sending failed: {str(e)}")
+            logger.error(f"Unexpected Telegram error: {str(e)}")
+            return False, str(e)
+
+    def get_bot_info(self):
+        """Получение информации о боте"""
+        try:
+            url = f"{self.base_url}/getMe"
+            response = requests.get(url, timeout=5)
+            data = response.json()
+            return data if data.get('ok') else None
+        except Exception as e:
+            logger.error(f"Bot info error: {str(e)}")
+            return None
+
+
+def get_telegram_chat_id(bot_token):
+    """Получить chat_id через обновления бота"""
+    try:
+        url = f"https://api.telegram.org/bot{bot_token}/getUpdates"
+        response = requests.get(url, timeout=5)
+        data = response.json()
+
+        if data.get('ok') and data.get('result'):
+            for update in data['result']:
+                if 'message' in update:
+                    return update['message']['chat']['id']
+        return None
+    except Exception as e:
+        logger.error(f"Chat ID fetch error: {str(e)}")
+        return None
+
+
+class SMSService:
+    def send_sms(self, phone, message):
+        """Простая отправка через SMS.ru API"""
+        try:
+            api_id = getattr(settings, 'SMSRU_API_ID', '')
+            if not api_id:
+                return False, "SMS API ID not configured"
+
+            url = "https://sms.ru/sms/send"
+            params = {
+                'api_id': api_id,
+                'to': phone,
+                'msg': message,
+                'json': 1
+            }
+
+            response = requests.get(url, params=params, timeout=10)
+            data = response.json()
+
+            if data.get('status') == 'OK':
+                return True, None
+            else:
+                return False, f"SMS error: {data.get('status_text', 'Unknown error')}"
+
+        except Exception as e:
+            logger.error(f"SMS sending error: {str(e)}")
             return False, str(e)
 
 
@@ -86,7 +128,7 @@ class NotificationService:
     def get_user_channels(self, user):
         """Получить активные каналы пользователя в порядке приоритета"""
         return NotificationPreference.objects.filter(
-            user=user, 
+            user=user,
             is_active=True
         ).order_by('priority')
 
@@ -117,7 +159,7 @@ class NotificationService:
             return False, "No active notification channels found"
 
         if preferred_channel:
-            channels = sorted(channels, 
+            channels = sorted(channels,
                             key=lambda x: x.notification_type != preferred_channel)
 
         success = False
